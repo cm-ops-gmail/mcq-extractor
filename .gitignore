@@ -1,0 +1,5 @@
+.DS_Store
+# Word files used for testing stay on your computer
+*.docx
+*.docm
+.vercel
