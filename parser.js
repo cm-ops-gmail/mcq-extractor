@@ -10,14 +10,16 @@
 
   const BN = "০১২৩৪৫৬৭৮৯";
   const LETTERS = ["ক", "খ", "গ", "ঘ"];
+  const ALL_LETTERS = ["ক", "খ", "গ", "ঘ", "ঙ"]; // some books print a fifth option; the sheet only has four
 
   const QUESTION_START = new RegExp(`^\\s*([${BN}0-9]+)\\s*[।.)]\\s*`);
   const SECTION_HEADING = /প্রশ্নোত্তর/;
   const SECTION_MARKER = /^\s*(mcq|cq)\s*\(\s*(start|end)\s*\)\s*$/i;
   const STIMULUS_START = /^\s*নিচের\s+উদ্দীপক/;
-  const OPTION_MARK = /\(\s*([কখগঘ])\s*\)/;
-  const OPTION_MARK_G = /\(\s*([কখগঘ])\s*\)/g;
-  const ANSWER = /উত্তর\s*[:：]?\s*\(?\s*([কখগঘ])\s*\)?/;
+  const OPTION_MARK = /\(\s*([কখগঘঙ])\s*\)+/;
+  const OPTION_MARK_G = /\(\s*([কখগঘঙ])\s*\)+/g; // "(ঘ))" typos are accepted
+  const OPTION_OPEN_G = /\(\s*([কখগঘঙ])(?=\s+\S)/g; // "(গ অর্থনৈতিক" typo: closing bracket missing
+  const ANSWER = /উত্তর\s*[:：]?\s*\(?\s*([কখগঘঙ])\s*\)?/;
   const EXPLANATION_ANY = /ব্যাখ্যা\s*[:：]?\s*/;
   const EXPLANATION_START = /^ব্যাখ্যা\s*[:：]?\s*/;
   const BOARD_TAIL = /\s*(\[[^\[\]]*\])\s*$/;
@@ -488,7 +490,16 @@
   }
 
   function parseOptions(text, mcq) {
-    const marks = [...text.matchAll(OPTION_MARK_G)];
+    // strict "(ক)" labels, plus "(গ " with a missing bracket when it is the next letter in order
+    const strict = [...text.matchAll(OPTION_MARK_G)].map((m) => ({ index: m.index, 0: m[0], 1: m[1], ok: true }));
+    const open = [...text.matchAll(OPTION_OPEN_G)].map((m) => ({ index: m.index, 0: m[0], 1: m[1], ok: false }))
+      .filter((m) => !strict.some((s) => s.index === m.index));
+    let last = Math.max(-1, ...Object.keys(mcq.options).map((k) => ALL_LETTERS.indexOf(k)));
+    const marks = [];
+    for (const m of [...strict, ...open].sort((a, b) => a.index - b.index)) {
+      const idx = ALL_LETTERS.indexOf(m[1]);
+      if (m.ok || idx === last + 1) { marks.push(m); last = idx; }
+    }
     marks.forEach((m, i) => {
       const end = i + 1 < marks.length ? marks[i + 1].index : text.length;
       mcq.options[m[1]] = text.slice(m.index + m[0].length, end).trim();
@@ -506,7 +517,7 @@
       cells += texts.length;
       for (let i = 0; i < texts.length; i++) {
         if (/^(sl|ans|serial|ক্রম|উত্তর)\.?$/i.test(texts[i])) { header = true; continue; }
-        const letter = (texts[i + 1] || "").match(/^\(?\s*([কখগঘ])\s*\)?$/);
+        const letter = (texts[i + 1] || "").match(/^\(?\s*([কখগঘঙ])\s*\)?$/);
         if (new RegExp(`^[${BN}0-9]+$`).test(texts[i]) && letter) {
           map[toInt(texts[i])] = letter[1];
           pairs++;
@@ -633,7 +644,13 @@
         cur = null; mode = null; stimLines = []; stim = null; prefixLines = [];
         return;
       }
-      const text = raw.replace(IMG_RE_G, "").trim();
+      let text = raw.replace(IMG_RE_G, "").trim();
+      // "(ঘ) পণ্যের দাম উত্তর: ক": the answer is written at the end of the last option's line
+      let inlineAnswer = "";
+      if (!/^উত্তর/.test(text) && OPTION_MARK.test(text)) {
+        const mid = /\s*উত্তর\s*[:：]\s*\(?\s*([কখগঘঙ])\s*\)?\s*$/.exec(text);
+        if (mid) { inlineAnswer = mid[1]; text = text.slice(0, mid.index).trim(); }
+      }
       if (SECTION_MARKER.test(text)) return; // stray "mcq (end)" style notes carry no meaning
       if (/^উত্তরমালা/.test(text)) { cur = null; mode = null; return; } // "answer key" banner
       if (/^(heading|title)/i.test(par.style)) { // chapter/section heading ends the current MCQ
@@ -673,6 +690,7 @@
         const [stripped, board] = splitBoard(par, text);
         cur.board = board;
         cur.title = stripped.replace(QUESTION_START, "").trim();
+        if (inlineAnswer) cur.answer = inlineAnswer;
         const firstMark = OPTION_MARK.exec(cur.title); // options written on the title line itself
         if (firstMark) {
           parseOptions(cur.title.slice(firstMark.index), cur);
@@ -735,13 +753,14 @@
           return;
         }
         parseOptions(text, cur);
+        if (inlineAnswer) cur.answer = inlineAnswer;
         mode = "options";
       } else if (mode === "title") { // title wrapped over several paragraphs
         const [t, b] = splitBoard(par, text);
         if (t) cur.title = cur.title ? cur.title + "\n" + t : t;
         cur.board = cur.board || b;
       } else if (mode === "options" && Object.keys(cur.options).length) { // continuation of the last option
-        const last = LETTERS.filter((k) => k in cur.options).pop();
+        const last = ALL_LETTERS.filter((k) => k in cur.options).pop();
         cur.options[last] = (cur.options[last] + " " + text).trim();
       }
     });
@@ -770,7 +789,7 @@
     return mcqs.map((q, i) => {
       const hasImage = !!q.image || Object.values(q.optionImageUrls || {}).some(Boolean);
       // "failed": no answer found for it, or fewer than four options were read
-      const failed = !q.answer || Object.keys(q.options).length < 4;
+      const failed = !LETTERS.includes(q.answer) || LETTERS.some((l) => q.options[l] === undefined && !(q.optionImageUrls || {})[l]);
       const row = [failed ? "failed" : "", i + 1, hasImage ? "m4" : "m1", q.chapter || "", q.board, q.title, q.image || "", q.explanation];
       for (const l of LETTERS) {
         const picture = (q.optionImageUrls || {})[l] || "";
