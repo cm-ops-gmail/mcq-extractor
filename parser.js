@@ -15,7 +15,9 @@
   const QUESTION_START = new RegExp(`^\\s*([${BN}0-9]+)\\s*[।.)]\\s*`);
   const SECTION_HEADING = /প্রশ্নোত্তর/;
   const SECTION_MARKER = /^\s*(mcq|cq)\s*\(\s*(start|end)\s*\)\s*$/i;
-  const STIMULUS_START = /^\s*নিচের\s+উদ্দীপক/;
+  // "[নিচের] উদ্দীপক/অনুচ্ছেদ/তথ্য/চিত্র/ছক … পড়ো/পড়ে/লক্ষ্য কর … ৩৯ ও ৪০ নং প্রশ্নের উত্তর দাও:"
+  const STIMULUS_WORD = /^\s*(নিচের\s+)?(উদ্দীপক|অনুচ্ছেদ|তথ্য|চিত্র|ছক|কবিতা|গদ্যাংশ)\S*\s/;
+  const STIMULUS_START = { test: (t) => STIMULUS_WORD.test(t) && /উত্তর\s*দাও/.test(t.slice(0, 160)) && /[০-৯0-9]/.test(t.slice(0, 120)) && !QUESTION_START.test(t) };
   const OPTION_MARK = /\(\s*([কখগঘঙ])\s*\)+/;
   const OPTION_MARK_G = /\(\s*([কখগঘঙ])\s*\)+/g; // "(ঘ))" typos are accepted
   const OPTION_OPEN_G = /\(\s*([কখগঘঙ])(?=\s+\S)/g; // "(গ অর্থনৈতিক" typo: closing bracket missing
@@ -671,7 +673,10 @@
 
       if (STIMULUS_START.test(text)) {
         cur = null; mode = null;
-        stimLines = [text]; stim = null;
+        // the header sentence ends at "দাও:"; the passage may follow in the same paragraph
+        const hd = /^(.*?উত্তর\s*দাও\s*[:ঃ]?)\s*(.*)$/s.exec(text);
+        stimLines = hd ? [hd[1], ...(hd[2] ? [hd[2]] : [])] : [text];
+        stim = null;
         return;
       }
 
@@ -680,7 +685,11 @@
         const num = toInt(qm[1]);
         if (stimLines.length) {
           const nums = stimulusNumbers(stimLines[0]);
-          stim = { text: stimLines.join("\n"), nums: nums.size ? nums : new Set([num]) };
+          // a board tag printed at the end of the passage belongs in the Board cell, not in the passage
+          let stimBoard = "";
+          const lastLine = stimLines[stimLines.length - 1], bt = stimLines.length > 1 ? BOARD_TAIL.exec(lastLine) : null;
+          if (bt) { stimBoard = bt[1]; stimLines[stimLines.length - 1] = lastLine.slice(0, bt.index).trim(); }
+          stim = { text: stimLines.join("\n"), nums: nums.size ? nums : new Set([num]), board: stimBoard };
           stimLines = [];
         }
         cur = newMCQ(num);
@@ -699,7 +708,7 @@
         } else mode = "title";
         if (prefixLines.length && prefixAt === i - 1) cur.title = prefixLines.join("\n") + "\n" + cur.title;
         prefixLines = [];
-        if (stim && stim.nums.has(num)) cur.title = stim.text + "\n" + cur.title;
+        if (stim && stim.nums.has(num)) { cur.title = stim.text + "\n" + cur.title; cur.board = cur.board || stim.board; }
         if (stim && num >= Math.max(...stim.nums)) stim = null;
         return;
       }
