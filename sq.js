@@ -5,6 +5,7 @@
   const P = root.MCQParser.internals;
   const { iterBlocks, paragraphInfo, splitBoard, kid, QUESTION_START, KA, IMG_RE_G, W } = P;
 
+  const HAS_OPTION = /\(\s*[কখগঘঙ]\s*[)\s]/; // "(ক)" or a mistyped "(ক "
   const BANNER = /প্রশ্নোত্তর/;
   const ANSWER_START = /^\s*উত্তর\s*[:：ঃ]?\s*/;
   const BOARD_ONLY = /^\s*\[[^\[\]]*\]\s*$/;
@@ -16,6 +17,15 @@
   const CQ_ANSWER_HEAD = /^\s*([০-৯0-9]+)\s*নং\s*প্রশ্নের\s*উত্তর\s*[:ঃ]?\s*$/;
   // only these parts are short questions; (গ) and (ঘ) are the long ones
   const CQ_TYPES = { "ক": "জ্ঞানমূলক", "খ": "অনুধাবনমূলক" };
+
+  // "(ক) A (খ) B (গ) C" -> [["ক","A"],["খ","B"],["গ","C"]]
+  const splitSubs = (text) => {
+    const marks = [...text.matchAll(/\(\s*([কখগঘ])\s*\)/g)];
+    if (!marks.length || marks[0].index !== 0) return [];
+    return marks.map((m, i) => [m[1], text.slice(m.index + m[0].length, i + 1 < marks.length ? marks[i + 1].index : text.length).trim()]);
+  };
+  // a creative question's part reads like a question or an instruction; an MCQ option does not
+  const READS_AS_QUESTION = /[?？]|কী|কেন|কত|কোন|কীভাবে|কর[োো]?\b|করুন|লেখো|দাও|বলো|ব্যাখ্যা|বিশ্লেষণ|বর্ণনা|নির্ণয়|মতামত|যাচাই|মূল্যায়ন|আলোচনা/;
 
   const HEADERS = ["status", "SI", "type", "chapter", "Board", "title", "answer"];
 
@@ -52,10 +62,11 @@
     const startsSQ = (i) => {
       const t = textOf(pars[i]);
       if (!QUESTION_START.test(t)) return false;
+      if (HAS_OPTION.test(t)) return false; // options on the line itself: an MCQ, whatever follows
       if (ANSWER_START.test(t.replace(QUESTION_START, "")) === false && /উত্তর\s*[:：ঃ]/.test(t)) return true; // answer on the same line
       for (let j = i + 1; j < Math.min(i + 4, pars.length); j++) {
         const u = textOf(pars[j]);
-        if (QUESTION_START.test(u) || KA.test(u)) return false;
+        if (QUESTION_START.test(u) || HAS_OPTION.test(u)) return false;
         if (ANSWER_START.test(u)) return true;
       }
       return false;
@@ -70,7 +81,7 @@
       if (!text) return;
 
       // ---- creative questions ----
-      const isBanner = text.length <= 60 && BANNER.test(text) && !QUESTION_START.test(text);
+      const isBanner = text.length <= 60 && (BANNER.test(text) || MCQ_BANNER.test(text)) && !QUESTION_START.test(text);
       if (isBanner || /^(heading|title)/i.test(par.style)) finishCQ();
       const stemM = CQ_STEM.exec(text);
       if (stemM) {
@@ -93,7 +104,18 @@
       if (cq) {
         const sub = CQ_SUB.exec(text);
         if (cqMode === "stem" || cqMode === "sub") {
-          if (sub) { cqMode = "sub"; cqLetter = sub[1]; cq.subs[cqLetter] = text.replace(CQ_SUB, "").trim(); return; }
+          const pieces = sub ? splitSubs(text) : [];
+          // several labels on one line with nothing that reads like a question: an MCQ's options, so this was no creative question
+          if (pieces.length > 1 && !pieces.some((p) => READS_AS_QUESTION.test(p[1]))) {
+            if (!Object.keys(cq.subs).length) cqs.splice(cqs.indexOf(cq), 1);
+            finishCQ();
+            return;
+          }
+          if (pieces.length) {
+            cqMode = "sub";
+            for (const [l, t] of pieces) { cqLetter = l; cq.subs[l] = t; }
+            return;
+          }
           if (cqMode === "sub") { cq.subs[cqLetter] = (cq.subs[cqLetter] + " " + text).trim(); return; }
           const [t, b] = splitBoard(par, text);
           if (t) cq.stem = (cq.stem ? cq.stem + "\n" : "") + t;
@@ -101,14 +123,14 @@
           return;
         }
         if (cqMode === "ans") {
-          if (sub) { cqLetter = sub[1]; cq.answers[cqLetter] = text.replace(CQ_SUB, "").trim(); return; }
+          if (sub) { for (const [l, t] of splitSubs(text)) { cqLetter = l; cq.answers[l] = t; } return; }
           if (cqLetter) { cq.answers[cqLetter] = (cq.answers[cqLetter] + " " + text).trim(); return; }
           return;
         }
       }
 
       // section banners decide the type ("জ্ঞানমূলক", "অনুধাবনমূলক" …); MCQ sections switch collecting off
-      if (text.length <= 60 && BANNER.test(text) && !QUESTION_START.test(text)) {
+      if (isBanner) {
         finish();
         if (MCQ_BANNER.test(text)) { inSQ = false; return; }
         type = text.replace(BANNER, "").replace(/[\s:–-]+$/, "").trim();
