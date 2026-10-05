@@ -634,7 +634,7 @@
         let prev = Infinity;
         for (let k = mcqs.length - 1; k >= 0; k--) {
           const q = mcqs[k];
-          if (q.answer || q.num > prev) break; // answered question, or the numbering restarted
+          if (q.num > prev) break; // the numbering restarted: an earlier block (questions with an answer line are walked over)
           block.unshift(q);
           prev = q.num;
           if (q.num === 1) break;
