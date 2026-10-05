@@ -175,7 +175,7 @@
       for (const letter of Object.keys(CQ_TYPES)) {
         if (c.subs[letter] === undefined) continue;
         cqItems.push({ type: CQ_TYPES[letter], chapter: c.chapter, board: c.board,
-          title: (c.stem + "\n" + c.subs[letter]).trim(), answer: (c.answers[letter] || "").trim() });
+          title: c.subs[letter].trim(), answer: (c.answers[letter] || "").trim() });
       }
     }
     return { items: items.concat(cqItems), cqCount: cqs.length, cqNoAnswer: cqs.filter((c) => !Object.keys(c.answers).length).length };
