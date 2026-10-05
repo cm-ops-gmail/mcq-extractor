@@ -810,7 +810,9 @@
     });
   }
 
-  const api = { parse, toRows, HEADERS, LETTERS, paraText, tex, assignImages, tokens };
+  // building blocks shared with the short-question (SQ) scraper
+  const internals = { iterBlocks, paragraphInfo, splitBoard, kid, QUESTION_START, KA, IMG_RE_G, W };
+  const api = { parse, toRows, HEADERS, LETTERS, paraText, tex, assignImages, tokens, internals };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.MCQParser = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);

@@ -26,7 +26,8 @@
     // NFD so "য়" is "য" + nukta whichever way the document stored it
     const m = /অ\s*ধ্যা\s*য\u09BC?\s*((?:[০-৯0-9]\s*)+)[\s▶►▸▷>:|\-–—]*(.*)$/u.exec(text.normalize("NFD"));
     if (!m) return "";
-    const num = m[1].replace(/\s+/g, "");
+    // no leading zeros: "০১" -> "১" (a lone "০" stays)
+    const num = m[1].replace(/\s+/g, "").replace(/^[০0]+(?=[০-৯1-9])/, "");
     const name = m[2].normalize("NFC").replace(/\s+/g, " ").replace(/\s*[0-9০-৯]+$/, "").trim();
     return name ? `অধ্যায় ${num}: ${name}` : `অধ্যায় ${num}`;
   }
@@ -37,7 +38,7 @@
    *   encode   async (entries) => data URL; entries = [{ crop, getBytes: async () => Uint8Array }]
    *   deps     { JSZip, DOMParser } (defaults to the page globals)
    */
-  async function extract(data, { encode, onProgress, deps } = {}) {
+  async function extract(data, { encode, onProgress, deps, kind } = {}) {
     const JSZip = (deps && deps.JSZip) || root.JSZip;
     const Parser = (deps && deps.DOMParser) || root.DOMParser;
     const progress = onProgress || (() => {});
@@ -97,6 +98,10 @@
 
     progress("Finding MCQs…");
     const body = doc.getElementsByTagNameNS(W, "body")[0];
+    if (kind === "sq") { // short questions: no pictures or options, so no image step
+      const found = root.SQParser.parse(body, rels, styleNames, chapterOf);
+      return { mcqs: found.items, skipped: 0, keys: 0, rows: root.SQParser.toRows(found.items) };
+    }
     const { mcqs, registry, skipped, keys } = root.MCQParser.parse(body, rels, styleNames, chapterOf);
 
     const entry = (i) => ({
@@ -115,12 +120,14 @@
     return { mcqs, skipped, keys, rows: root.MCQParser.toRows(mcqs) };
   }
 
-  async function buildWorkbook(ExcelJS, rows) {
+  // spec (optional): { sheet, headers, widths, imageCols }; defaults are the MCQ sheet
+  async function buildWorkbook(ExcelJS, rows, spec) {
+    spec = spec || {};
     const wb = new ExcelJS.Workbook();
-    const ws = wb.addWorksheet("MCQs");
-    ws.addRow(root.MCQParser.HEADERS);
+    const ws = wb.addWorksheet(spec.sheet || "MCQs");
+    ws.addRow(spec.headers || root.MCQParser.HEADERS);
     rows.forEach((r) => ws.addRow(r));
-    const widths = [8, 6, 8, 30, 14, 45, 12, 70];
+    const widths = spec.widths || [8, 6, 8, 30, 14, 45, 12, 70];
     ws.columns.forEach((col, i) => (col.width = i < widths.length ? widths[i] : 18));
     const head = ws.getRow(1);
     head.eachCell((c) => {
@@ -133,7 +140,7 @@
     });
     // picture cells (question image, then one per option): links become clickable hyperlinks (the cell text
     // stays the URL) and these cells do not wrap, so a long link or base64 text does not make the row huge
-    for (const col of [7, 11, 14, 17, 20]) {
+    for (const col of spec.imageCols || [7, 11, 14, 17, 20]) {
       ws.getColumn(col).eachCell((c, n) => {
         if (n === 1) return;
         c.alignment = { vertical: "middle", wrapText: false };
