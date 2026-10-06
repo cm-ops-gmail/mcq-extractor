@@ -104,7 +104,7 @@
     }
     const { mcqs, registry, skipped, keys } = root.MCQParser.parse(body, rels, styleNames, chapterOf);
 
-    const entry = (i) => ({
+    const entry = (i) => registry[i].table ? { table: registry[i].table } : ({
       crop: registry[i].crop,
       getBytes: async () => zip.file(registry[i].target).async("uint8array"),
     });

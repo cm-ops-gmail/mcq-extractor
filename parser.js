@@ -530,6 +530,24 @@
     return (header && pairs >= 1) || (pairs >= 3 && pairs * 2 >= cells * 0.8) ? map : null;
   }
 
+  // A grid of data (at least 2 rows x 2 columns of cells, some text) that is not a layout for options:
+  // tables whose cells carry "(ক)"-style labels are option layouts and stay text.
+  function isDataTable(tbl) {
+    const rows = kids(tbl).filter((r) => local(r) === "tr");
+    if (rows.length < 2) return false;
+    let cols = 0, filled = 0, labels = 0;
+    for (const tr of rows) {
+      const cells = kids(tr).filter((c) => local(c) === "tc");
+      cols = Math.max(cols, cells.length);
+      for (const tc of cells) {
+        const t = Array.from(tc.getElementsByTagNameNS(W, "t")).map((x) => x.textContent).join("").trim();
+        if (t) filled++;
+        if (/^\(?\s*[কখগঘঙ]\s*\)/.test(t) || /\(\s*[কখগঘ]\s*\)/.test(t)) labels++;
+      }
+    }
+    return cols >= 2 && filled >= 4 && labels === 0 && !tbl.getElementsByTagNameNS(W, "drawing").length;
+  }
+
   // block-level items in document order: paragraphs (tables are flattened) and answer tables
   function* iterBlocks(node) {
     for (const c of kids(node)) {
@@ -540,10 +558,15 @@
         const key = answerKey(c);
         if (key) yield { key };
         else {
+          const flat = [];
           for (const tr of kids(c)) {
             if (local(tr) !== "tr") continue;
-            for (const tc of kids(tr)) if (local(tc) === "tc") yield* iterBlocks(tc);
+            for (const tc of kids(tr)) if (local(tc) === "tc") for (const b of iterBlocks(tc)) flat.push(b);
           }
+          // a table of data typed into a question is kept as a picture; `paras` is its text, used when
+          // the table turns out not to sit in a question
+          if (isDataTable(c)) yield { table: c, paras: flat };
+          else yield* flat;
         }
       } else if (t === "sdt") {
         const content = kid(c, "sdtContent", W);
@@ -592,6 +615,18 @@
     const sectPrs = []; // sectPrs[n] = the sectPr that closes section n (its page headers give the chapter)
     for (const item of iterBlocks(bodyEl)) {
       if (item.key) { pars.push({ raw: "\ue002", italic: "", style: "", key: item.key, section }); continue; }
+      if (item.table) { // a data table: a picture mark now, its flattened text only as a fallback
+        const idx = registry.length;
+        registry.push({ table: item.table });
+        pars.push({ raw: `${IMG_L}${idx}${IMG_R}`, italic: "", style: "", section, tableMark: true });
+        for (const sub of item.paras) {
+          if (!sub.p) continue;
+          const tinfo = paragraphInfo(sub.p, rels, null, styleNames || {});
+          tinfo.section = section; tinfo.tableText = true;
+          if (tinfo.raw) pars.push(tinfo);
+        }
+        continue;
+      }
       const info = paragraphInfo(item.p, rels, registry, styleNames || {});
       info.section = section;
       if (info.raw) pars.push(info);
@@ -620,11 +655,23 @@
 
     let mcqs = [], cur = null, mode = null; // mode: title | options | answer | explanation
     let stimLines = [], stim = null;
+    // look-ahead view of the paragraphs without the fallback text of tables (it would push the options out of reach)
+    const look = pars.filter((p) => !p.tableText);
+    const lookAt = [];
+    { let k = 0; pars.forEach((p, n) => { lookAt[n] = k; if (!p.tableText) k++; }); }
+    let stimTokens = [], skipTableText = false; // pictures (tables) printed inside a stimulus; whether the table just seen became a picture
     let prefixLines = [], prefixAt = -2; // equation lines right after a question's options belong to the NEXT question
     const newMCQ = (num) => ({ num, chapter: "", title: "", board: "", options: {}, answer: "", explanation: "", tokens: [], boxes: [] });
 
     pars.forEach((par, i) => {
       const raw = par.raw;
+      if (par.tableMark) { // the table becomes a picture of the question (or of the passage) it sits in
+        skipTableText = false;
+        if (stimLines.length) { stimTokens.push(...tokens(raw)); skipTableText = true; }
+        else if (cur && (mode === "title" || mode === "options")) { cur.tokens.push(...tokens(raw)); skipTableText = true; }
+        return;
+      }
+      if (par.tableText && skipTableText) return;
       if (par.banner) { cur = null; mode = null; return; }
       if (par.key) {
         // answer table: fill in the answers of the block of questions right above it. A block is the
@@ -666,22 +713,23 @@
           (text.length <= 60 && SECTION_HEADING.test(text)) ||
           (mode === "explanation" && text.startsWith("উত্তর")) ||
           (QUESTION_START.test(text) &&
-            pars.slice(i + 1, i + 4).some((p) => p.raw.startsWith("উত্তর")) &&
-            !pars.slice(i, i + 4).some((p) => KA.test(p.raw)));
+            look.slice(lookAt[i] + 1, lookAt[i] + 4).some((p) => p.raw.startsWith("উত্তর")) &&
+            !look.slice(lookAt[i], lookAt[i] + 4).some((p) => KA.test(p.raw)));
         if (ends) { cur = null; mode = null; return; }
       }
 
       if (STIMULUS_START.test(text)) {
         cur = null; mode = null;
         // the header sentence ends at "দাও:"; the passage may follow in the same paragraph
-        const hd = /^(.*?উত্তর\s*দাও\s*[:ঃ]?)\s*(.*)$/s.exec(text);
+        const hd = /^(.*?উত্তর\s*দাও\s*[:ঃ।]?)\s*(.*)$/s.exec(text);
         stimLines = hd ? [hd[1], ...(hd[2] ? [hd[2]] : [])] : [text];
         stim = null;
+        stimTokens = [];
         return;
       }
 
       const qm = QUESTION_START.exec(text);
-      if (qm && optionsFollow(pars, i)) {
+      if (qm && optionsFollow(look, lookAt[i])) {
         const num = toInt(qm[1]);
         if (stimLines.length) {
           const nums = stimulusNumbers(stimLines[0]);
@@ -689,7 +737,8 @@
           let stimBoard = "";
           const lastLine = stimLines[stimLines.length - 1], bt = stimLines.length > 1 ? BOARD_TAIL.exec(lastLine) : null;
           if (bt) { stimBoard = bt[1]; stimLines[stimLines.length - 1] = lastLine.slice(0, bt.index).trim(); }
-          stim = { text: stimLines.join("\n"), nums: nums.size ? nums : new Set([num]), board: stimBoard };
+          stim = { text: stimLines.join("\n"), nums: nums.size ? nums : new Set([num]), board: stimBoard, tokens: stimTokens };
+          stimTokens = [];
           stimLines = [];
         }
         cur = newMCQ(num);
@@ -709,6 +758,7 @@
         if (prefixLines.length && prefixAt === i - 1) cur.title = prefixLines.join("\n") + "\n" + cur.title;
         prefixLines = [];
         if (stim && stim.nums.has(num)) { cur.title = stim.text + "\n" + cur.title; cur.board = cur.board || stim.board; }
+        if (stim && stim.nums.has(num) && stim.tokens.length) cur.tokens.unshift(...stim.tokens);
         if (stim && num >= Math.max(...stim.nums)) stim = null;
         return;
       }

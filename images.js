@@ -100,7 +100,7 @@
   }
 
   function toDataUrl(canvas) {
-    for (const side of [500, 400, 300, 220, 160, 120, 80]) {
+    for (const side of [900, 700, 500, 400, 300, 220, 160, 120, 80]) {
       const scale = Math.min(1, side / Math.max(canvas.width, canvas.height));
       for (const step of [0, 32, 64]) {
         const c = newCanvas(canvas.width * scale, canvas.height * scale);
@@ -115,10 +115,92 @@
     return "";
   }
 
-  // entries: [{ crop, getBytes }] -> data URL ("" when nothing could be decoded)
+  // ---------- Word tables drawn as a picture ----------
+  const TW = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+  const kidsOf = (el) => Array.from(el.children || []);
+  const named = (el, n) => kidsOf(el).find((c) => c.localName === n && c.namespaceURI === TW) || null;
+  const attrW = (el, n) => (el ? el.getAttributeNS(TW, n) : null);
+
+  function cellInfo(tc) {
+    const paras = kidsOf(tc).filter((c) => c.localName === "p");
+    const lines = paras.map((p) => (root.MCQParser ? root.MCQParser.paraText(p, {}, null) : p.textContent).replace(/\t/g, " ").trim());
+    const bold = paras.some((p) => Array.from(p.getElementsByTagNameNS(TW, "b")).some((b) => attrW(b, "val") !== "0" && attrW(b, "val") !== "false"));
+    const jc = paras.map((p) => attrW(named(named(p, "pPr"), "jc"), "val")).find(Boolean) || "left";
+    const pr = named(tc, "tcPr");
+    const shd = named(pr, "shd");
+    const fill = shd && attrW(shd, "fill") && attrW(shd, "fill") !== "auto" ? "#" + attrW(shd, "fill") : "";
+    const vm = named(pr, "vMerge");
+    return {
+      text: lines.join("\n").replace(/\n{2,}/g, "\n").trim(),
+      bold, align: jc === "center" ? "center" : jc === "right" || jc === "end" ? "right" : "left", fill,
+      span: parseInt(attrW(named(pr, "gridSpan"), "val") || "1", 10) || 1,
+      vmerge: vm ? (attrW(vm, "val") === "restart" ? "restart" : "continue") : "",
+    };
+  }
+
+  // Draw a Word table (grid, merged cells, shading, bold, alignment) onto a white canvas.
+  function drawTable(tbl) {
+    const S = 2, PAD = 8, LINE = 20, FONT = '15px "Noto Sans Bengali","Geist",system-ui,sans-serif';
+    const grid = named(tbl, "tblGrid");
+    let cols = grid ? kidsOf(grid).filter((c) => c.localName === "gridCol").map((c) => Math.max(40, (parseInt(attrW(c, "w"), 10) || 1500) / 15)) : [];
+    const rows = kidsOf(tbl).filter((r) => r.localName === "tr").map((tr) => {
+      let col = 0;
+      return kidsOf(tr).filter((c) => c.localName === "tc").map((tc) => { const ci = cellInfo(tc); ci.col = col; col += ci.span; return ci; });
+    });
+    const ncols = Math.max(cols.length, ...rows.map((r) => (r.length ? r[r.length - 1].col + r[r.length - 1].span : 0)));
+    while (cols.length < ncols) cols.push(100);
+    const total = cols.reduce((a, b) => a + b, 0);
+    if (total > 900) cols = cols.map((w) => (w * 900) / total); // keep very wide tables readable
+    const xs = [0]; cols.forEach((w) => xs.push(xs[xs.length - 1] + w));
+
+    const meas = document.createElement("canvas").getContext("2d");
+    const wrap = (cell, width) => {
+      meas.font = (cell.bold ? "600 " : "") + FONT;
+      const out = [];
+      for (const para of cell.text.split("\n")) {
+        let line = "";
+        for (const word of para.split(/(\s+)/)) {
+          const t = line + word;
+          if (line && meas.measureText(t).width > width - 2 * PAD) { out.push(line.trimEnd()); line = word.trimStart(); } else line = t;
+        }
+        out.push(line.trimEnd());
+      }
+      return out;
+    };
+    // row heights come from cells that are not vertically merged
+    const heights = rows.map((r) => Math.max(30, ...r.filter((c) => c.vmerge !== "continue" && c.text).map((c) => wrap(c, xs[Math.min(c.col + c.span, ncols)] - xs[c.col]).length * LINE + 2 * PAD - 4)));
+    const ys = [0]; heights.forEach((h) => ys.push(ys[ys.length - 1] + h));
+
+    const canvas = newCanvas((xs[ncols] + 2) * S, (ys[rows.length] + 2) * S);
+    const g = canvas.getContext("2d");
+    g.fillStyle = "#fff"; g.fillRect(0, 0, canvas.width, canvas.height);
+    g.scale(S, S); g.translate(1, 1);
+    g.textBaseline = "middle"; g.lineWidth = 1; g.strokeStyle = "#222";
+    rows.forEach((r, ri) => {
+      for (const c of r) {
+        if (c.vmerge === "continue") continue;
+        let rs = 1;
+        if (c.vmerge === "restart") for (let k = ri + 1; k < rows.length; k++) { const below = rows[k].find((x) => x.col === c.col); if (below && below.vmerge === "continue") rs++; else break; }
+        const x0 = xs[c.col], x1 = xs[Math.min(c.col + c.span, ncols)], y0 = ys[ri], y1 = ys[ri + rs];
+        if (c.fill) { g.fillStyle = c.fill; g.fillRect(x0, y0, x1 - x0, y1 - y0); }
+        g.strokeRect(x0, y0, x1 - x0, y1 - y0);
+        if (!c.text) continue;
+        const lines = wrap(c, x1 - x0);
+        g.font = (c.bold ? "600 " : "") + FONT; g.fillStyle = "#000";
+        g.textAlign = c.align;
+        const tx = c.align === "center" ? (x0 + x1) / 2 : c.align === "right" ? x1 - PAD : x0 + PAD;
+        const top = y0 + (y1 - y0 - lines.length * LINE) / 2 + LINE / 2;
+        lines.forEach((ln, li) => g.fillText(ln, tx, top + li * LINE));
+      }
+    });
+    return canvas;
+  }
+
+  // entries: [{ crop, getBytes } | { table }] -> data URL ("" when nothing could be decoded)
   async function encode(entries) {
     const parts = [];
     for (const e of entries) {
+      if (e.table) { try { parts.push(trim(drawTable(e.table))); } catch (err) { console.warn("table skipped", err); } continue; }
       const bitmap = await decode(await e.getBytes());
       if (bitmap) parts.push(trim(toCanvas(bitmap, e.crop)));
     }

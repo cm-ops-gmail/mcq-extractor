@@ -33,7 +33,9 @@
     const pars = [];
     let section = 0;
     const sectPrs = [];
-    for (const item of iterBlocks(bodyEl)) {
+    const blocks = [];
+    for (const it of iterBlocks(bodyEl)) { if (it.table) blocks.push(...it.paras); else blocks.push(it); } // tables stay text here
+    for (const item of blocks) {
       if (item.key) continue; // answer tables belong to MCQs
       const info = paragraphInfo(item.p, rels, null, styleNames || {});
       info.section = section;
