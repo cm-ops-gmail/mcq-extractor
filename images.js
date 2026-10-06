@@ -121,9 +121,30 @@
   const named = (el, n) => kidsOf(el).find((c) => c.localName === n && c.namespaceURI === TW) || null;
   const attrW = (el, n) => (el ? el.getAttributeNS(TW, n) : null);
 
+  // plain characters of a paragraph in reading order, equations included ("↓", "→", "H₂O"), never LaTeX
+  const SUBS = { "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉", "+": "₊", "-": "₋", "−": "₋", "=": "₌", "(": "₍", ")": "₎" };
+  const SUPS = { "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "+": "⁺", "-": "⁻", "−": "⁻", "=": "⁼", "(": "⁽", ")": "⁾", "n": "ⁿ" };
+  const TM = "http://schemas.openxmlformats.org/officeDocument/2006/math";
+  function plain(p) {
+    let out = "";
+    for (const n of Array.from(p.getElementsByTagName("*"))) {
+      const ln = n.localName;
+      if (ln === "t") {
+        let t = n.textContent || "", mode = "";
+        for (let a = n.parentNode; a && a !== p; a = a.parentNode) {
+          if (a.namespaceURI === TM && (a.localName === "sub" || a.localName === "sup")) { mode = a.localName; break; }
+        }
+        if (mode) { const map = mode === "sub" ? SUBS : SUPS; t = [...t].map((c) => map[c] || c).join(""); }
+        out += t;
+      } else if (ln === "tab") out += " ";
+      else if (ln === "br" || ln === "cr") out += "\n";
+    }
+    return out;
+  }
+
   function cellInfo(tc) {
     const paras = kidsOf(tc).filter((c) => c.localName === "p");
-    const lines = paras.map((p) => (root.MCQParser ? root.MCQParser.paraText(p, {}, null) : p.textContent).replace(/\t/g, " ").trim());
+    const lines = paras.map((p) => plain(p).replace(/[ \t]+/g, " ").trim());
     const bold = paras.some((p) => Array.from(p.getElementsByTagNameNS(TW, "b")).some((b) => attrW(b, "val") !== "0" && attrW(b, "val") !== "false"));
     const jc = paras.map((p) => attrW(named(named(p, "pPr"), "jc"), "val")).find(Boolean) || "left";
     const pr = named(tc, "tcPr");
@@ -140,7 +161,7 @@
 
   // Draw a Word table (grid, merged cells, shading, bold, alignment) onto a white canvas.
   function drawTable(tbl) {
-    const S = 2, PAD = 8, LINE = 20, FONT = '15px "Noto Sans Bengali","Geist",system-ui,sans-serif';
+    const S = 2, PAD = 8, LINE = 20, FONT = '16px "Cambria","Times New Roman","Noto Serif","Noto Sans Bengali",serif';
     const grid = named(tbl, "tblGrid");
     let cols = grid ? kidsOf(grid).filter((c) => c.localName === "gridCol").map((c) => Math.max(40, (parseInt(attrW(c, "w"), 10) || 1500) / 15)) : [];
     const rows = kidsOf(tbl).filter((r) => r.localName === "tr").map((tr) => {
@@ -149,6 +170,16 @@
     });
     const ncols = Math.max(cols.length, ...rows.map((r) => (r.length ? r[r.length - 1].col + r[r.length - 1].span : 0)));
     while (cols.length < ncols) cols.push(100);
+    // a column is at least as wide as its longest unbreakable word
+    const probe = document.createElement("canvas").getContext("2d");
+    for (const r of rows) {
+      for (const c of r) {
+        if (c.span !== 1 || !c.text) continue;
+        probe.font = (c.bold ? "600 " : "") + FONT;
+        const need = Math.max(...c.text.split(/\s+/).map((w) => probe.measureText(w).width)) + 2 * PAD + 2;
+        if (need > cols[c.col]) cols[c.col] = need;
+      }
+    }
     const total = cols.reduce((a, b) => a + b, 0);
     if (total > 900) cols = cols.map((w) => (w * 900) / total); // keep very wide tables readable
     const xs = [0]; cols.forEach((w) => xs.push(xs[xs.length - 1] + w));
