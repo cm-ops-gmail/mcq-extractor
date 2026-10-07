@@ -227,10 +227,81 @@
     return canvas;
   }
 
-  // entries: [{ crop, getBytes } | { table }] -> data URL ("" when nothing could be decoded)
+  // ---------- Word drawing groups (a picture with text boxes laid over it) ----------
+  const EMU = 9525; // EMU per pixel at 96 dpi
+  const nm = (el, n) => kidsOf(el).find((c) => c.localName === n) || null;
+  const num = (el, n) => parseInt((el && el.getAttribute(n)) || "0", 10) || 0;
+  const xfrmOf = (shape) => {
+    const pr = nm(shape, "spPr") || nm(shape, "grpSpPr");
+    const x = pr && nm(pr, "xfrm");
+    if (!x) return null;
+    const off = nm(x, "off"), ext = nm(x, "ext"), cho = nm(x, "chOff"), che = nm(x, "chExt");
+    return { x: num(off, "x"), y: num(off, "y"), w: num(ext, "cx"), h: num(ext, "cy"), cx: num(cho, "x"), cy: num(cho, "y"), cw: num(che, "cx") || num(ext, "cx"), ch: num(che, "cy") || num(ext, "cy") };
+  };
+
+  async function drawGroup(e) {
+    const S = 2, g = e.group, top = xfrmOf(g);
+    if (!top || !top.w || !top.h) return null;
+    const canvas = newCanvas((top.w / EMU) * S, (top.h / EMU) * S);
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    // T maps a coordinate in the children's own space to canvas pixels
+    const T0 = { ox: 0, oy: 0, sx: (top.w / top.cw / EMU) * S, sy: (top.h / top.ch / EMU) * S, cx: top.cx, cy: top.cy };
+    const dev = (T, x, y) => [T.ox + (x - T.cx) * T.sx, T.oy + (y - T.cy) * T.sy];
+
+    async function draw(node, T) {
+      for (const c of kidsOf(node)) {
+        const n = c.localName;
+        if (n === "pic") {
+          const x = xfrmOf(c); if (!x) continue;
+          const blip = Array.from(c.getElementsByTagName("*")).find((b) => b.localName === "blip");
+          const target = blip && e.rels[blip.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "embed")];
+          if (!target) continue;
+          const bmp = await decode(await e.getBytes(target));
+          if (!bmp) continue;
+          const [x0, y0] = dev(T, x.x, x.y), [x1, y1] = dev(T, x.x + x.w, x.y + x.h);
+          const src = Array.from(c.getElementsByTagName("*")).find((b) => b.localName === "srcRect");
+          const cr = src ? ["l", "t", "r", "b"].map((k) => num(src, k) / 100000) : [0, 0, 0, 0];
+          const sx = bmp.width * cr[0], sy = bmp.height * cr[1], sw = bmp.width * (1 - cr[0] - cr[2]), sh = bmp.height * (1 - cr[1] - cr[3]);
+          ctx.drawImage(bmp, sx, sy, sw, sh, x0, y0, x1 - x0, y1 - y0);
+        } else if (n === "wsp") {
+          const x = xfrmOf(c); if (!x) continue;
+          const tb = Array.from(c.getElementsByTagName("*")).find((b) => b.localName === "txbxContent");
+          if (!tb) continue;
+          const [x0, y0] = dev(T, x.x, x.y), [x1, y1] = dev(T, x.x + x.w, x.y + x.h);
+          const body = Array.from(c.getElementsByTagName("*")).find((b) => b.localName === "bodyPr");
+          const ins = (k, d) => ((body && body.getAttribute(k) != null ? num(body, k) : d) / EMU) * S;
+          const padL = ins("lIns", 91440), padR = ins("rIns", 91440), padT = ins("tIns", 45720);
+          let y = y0 + padT;
+          for (const p of kidsOf(tb).filter((q) => q.localName === "p")) {
+            const text = plain(p).replace(/\s+/g, " ").trim();
+            const sz = Array.from(p.getElementsByTagName("*")).find((b) => b.localName === "sz");
+            const px = ((sz && parseInt(sz.getAttribute("w:val"), 10) ? parseInt(sz.getAttribute("w:val"), 10) : 22) / 2) * (96 / 72) * S;
+            const jc = (Array.from(p.getElementsByTagName("*")).find((b) => b.localName === "jc") || { getAttribute: () => "" }).getAttribute("w:val");
+            const bold = Array.from(p.getElementsByTagName("*")).some((b) => b.localName === "b" && b.getAttribute("w:val") !== "0");
+            ctx.font = (bold ? "600 " : "") + px + 'px "Cambria","Times New Roman","Noto Serif","Noto Sans Bengali",serif';
+            ctx.fillStyle = "#000"; ctx.textBaseline = "top";
+            ctx.textAlign = jc === "center" ? "center" : jc === "right" ? "right" : "left";
+            const tx = jc === "center" ? (x0 + x1) / 2 : jc === "right" ? x1 - padR : x0 + padL;
+            if (text) ctx.fillText(text, tx, y);
+            y += px * 1.25;
+          }
+        } else if (n === "grpSp") {
+          const x = xfrmOf(c); if (!x) continue;
+          const [x0, y0] = dev(T, x.x, x.y), [x1, y1] = dev(T, x.x + x.w, x.y + x.h);
+          await draw(c, { ox: x0, oy: y0, sx: (x1 - x0) / (x.cw || 1), sy: (y1 - y0) / (x.ch || 1), cx: x.cx, cy: x.cy });
+        }
+      }
+    }
+    await draw(g, T0);
+    return canvas;
+  }
+
+  // entries: [{ crop, getBytes } | { table } | { group, rels, getBytes }] -> data URL ("" when nothing could be decoded)
   async function encode(entries) {
     const parts = [];
     for (const e of entries) {
+      if (e.group) { try { const cv = await drawGroup(e); if (cv) parts.push(trim(cv)); } catch (err) { console.warn("drawing skipped", err); } continue; }
       if (e.table) { try { parts.push(trim(drawTable(e.table))); } catch (err) { console.warn("table skipped", err); } continue; }
       const bitmap = await decode(await e.getBytes());
       if (bitmap) parts.push(trim(toCanvas(bitmap, e.crop)));

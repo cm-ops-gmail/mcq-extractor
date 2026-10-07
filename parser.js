@@ -296,7 +296,14 @@
   // ---------- pictures ----------
   function elementImages(el, rels) {
     const out = [], seen = new Set();
+    // Word keeps a second, older copy of every drawing inside mc:Fallback: ignore it
+    const inFallback = (n) => { for (let a = n.parentNode; a && a !== el; a = a.parentNode) if (local(a) === "Fallback") return true; return false; };
+    // a drawing group (picture + text boxes, e.g. a graph with labels) is drawn as one piece
+    const groups = descendants(el).filter((g) => local(g) === "wgp" && !inFallback(g));
+    const topGroups = groups.filter((g) => !groups.some((o) => o !== g && o.contains(g)));
+    for (const g of topGroups) out.push({ group: g, rels });
     for (const x of descendants(el)) {
+      if (inFallback(x) || topGroups.some((g) => g.contains(x))) continue;
       const t = local(x);
       let rid = null, crop = null;
       if (t === "blip") {
@@ -724,7 +731,7 @@
         const hd = /^(.*?উত্তর\s*দাও\s*[:ঃ।]?)\s*(.*)$/s.exec(text);
         stimLines = hd ? [hd[1], ...(hd[2] ? [hd[2]] : [])] : [text];
         stim = null;
-        stimTokens = [];
+        stimTokens = tokens(raw).filter((t) => t[0] === "img"); // a figure in the header paragraph itself
         return;
       }
 
@@ -764,6 +771,7 @@
       }
 
       if (stimLines.length) { // passage text belonging to the stimulus
+        stimTokens.push(...tokens(raw).filter((t) => t[0] === "img")); // a figure printed in the passage
         if (text) stimLines.push(text);
         return;
       }
