@@ -40,7 +40,7 @@
   }
   $("tabs").addEventListener("click", (e) => {
     const a = e.target.closest("a");
-    if (!a) return;
+    if (!a || !a.dataset.mode) return; // "Word files" is a normal link
     e.preventDefault();
     if (busy) return; // a conversion is running: finish it first
     if (a.dataset.mode !== mode) {
