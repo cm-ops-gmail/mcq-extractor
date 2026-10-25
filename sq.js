@@ -34,7 +34,9 @@
     let section = 0;
     const sectPrs = [];
     const blocks = [];
-    for (const it of iterBlocks(bodyEl)) { if (it.table) blocks.push(...it.paras); else blocks.push(it); } // tables stay text here
+    // tables stay text here; a table inside a table cell arrives as a nested item, so unwrap until paragraphs
+    const unwrap = (it) => { if (it.table) it.paras.forEach(unwrap); else blocks.push(it); };
+    for (const it of iterBlocks(bodyEl)) unwrap(it);
     for (const item of blocks) {
       if (item.key) continue; // answer tables belong to MCQs
       const info = paragraphInfo(item.p, rels, null, styleNames || {});
