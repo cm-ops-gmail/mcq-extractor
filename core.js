@@ -25,7 +25,12 @@
   function parseChapter(text) {
     // NFD so "য়" is "য" + nukta whichever way the document stored it
     const m = /অ\s*ধ্যা\s*য\u09BC?\s*((?:[০-৯0-9]\s*)+)[\s▶►▸▷>:|\-–—]*(.*)$/u.exec(text.normalize("NFD"));
-    if (!m) return "";
+    if (!m) {
+      // headers without "অধ্যায়", e.g. "বাংলা প্রথম পত্র ▶ গদ্য ▶ অপরিচিতা": the chapter is the last part
+      const parts = text.normalize("NFC").split(/[▶►▸▷]/).map((x) => x.replace(/\s+/g, " ").trim());
+      if (parts.length < 3 || !parts[parts.length - 1]) return "";
+      return parts[parts.length - 1].replace(/\s+[0-9]+$/, ""); // a trailing page number (Latin digits) is not part of the name
+    }
     // no leading zeros: "০১" -> "১" (a lone "০" stays)
     const num = m[1].replace(/\s+/g, "").replace(/^[০0]+(?=[০-৯1-9])/, "");
     const name = m[2].normalize("NFC").replace(/\s+/g, " ").replace(/\s*[0-9০-৯]+$/, "").trim();
